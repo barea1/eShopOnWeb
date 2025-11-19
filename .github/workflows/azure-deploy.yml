@@ -1,0 +1,75 @@
+name: Despliegue eShop a Azure
+
+on:
+  push:
+    branches: [ "main" ] # Se activa al subir cambios a la rama main
+  workflow_dispatch:      # Permite activarlo manualmente desde un botón
+
+permissions:
+  contents: read
+
+env:
+  # ¡CAMBIA ESTO POR TUS NOMBRES REALES!
+  ACR_NAME: "acreshoptest123"       # Tu nombre de ACR (sin .azurecr.io)
+  RG_NAME: "rg-eshop-dev"           # Tu Resource Group de la app
+  STORAGE_RG: "rg-terraform-state"  # El RG donde guardaste el estado
+  STORAGE_ACC: "tfstatefcobareafdez123" # Tu cuenta de almacenamiento de estado
+  CONTAINER_NAME: "tfstate"
+  TF_STATE_FILE: "prod.terraform.tfstate"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. Descargar código
+    - name: Checkout del código
+      uses: actions/checkout@v3
+
+    # 2. Login en Azure (Usando credenciales individuales en secretos)
+    - name: Login en Azure
+      id: login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # 3. Login en tu ACR para poder subir imágenes
+    - name: Login en ACR
+      run: az acr login --name ${{ env.ACR_NAME }}
+
+    # 4. Construir y Subir API
+    - name: Build & Push API
+      run: |
+        docker build -f src/PublicApi/Dockerfile -t ${{ env.ACR_NAME }}.azurecr.io/eshoppublicapi:v1 .
+        docker push ${{ env.ACR_NAME }}.azurecr.io/eshoppublicapi:v1
+
+    # 5. Construir y Subir Web
+    - name: Build & Push Web
+      run: |
+        docker build -f src/Web/Dockerfile -t ${{ env.ACR_NAME }}.azurecr.io/eshoponweb:v1 .
+        docker push ${{ env.ACR_NAME }}.azurecr.io/eshoponweb:v1
+
+    # 6. Instalar Terraform
+    - name: Instalar Terraform
+      uses: hashicorp/setup-terraform@v2
+
+    # 7. Terraform Init & Apply
+    - name: Terraform Apply
+      # Importante: Indicamos dónde están los archivos .tf
+      working-directory: ./eShop-Terraform-Azure 
+      env:
+        # Inyectamos las credenciales de Azure para Terraform
+        ARM_CLIENT_ID: ${{ steps.login.outputs.clientId }}
+        ARM_CLIENT_SECRET: ${{ steps.login.outputs.clientSecret }}
+        ARM_SUBSCRIPTION_ID: ${{ steps.login.outputs.subscriptionId }}
+        ARM_TENANT_ID: ${{ steps.login.outputs.tenantId }}
+        # Inyectamos la contraseña de SQL desde el secreto
+        TF_VAR_sql_admin_password: ${{ secrets.SQL_ADMIN_PASSWORD }}
+      run: |
+        terraform init \
+          -backend-config="resource_group_name=${{ env.STORAGE_RG }}" \
+          -backend-config="storage_account_name=${{ env.STORAGE_ACC }}" \
+          -backend-config="container_name=${{ env.CONTAINER_NAME }}" \
+          -backend-config="key=${{ env.TF_STATE_FILE }}"
+        
+        terraform apply -auto-approve
